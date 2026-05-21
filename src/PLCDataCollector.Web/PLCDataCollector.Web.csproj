@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <!-- TAG: single-process-merge — 2026-05-20 — added WindowsServices + NLog.Extensions.Logging -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
+    <PackageReference Include="S7.Net" Version="2.0.0" />
+    <PackageReference Include="NLog" Version="5.3.0" />
+    <PackageReference Include="NLog.Web.AspNetCore" Version="5.3.0" />
+    <PackageReference Include="NLog.Extensions.Logging" Version="5.3.0" />
+    <!-- TAG: removed Newtonsoft.Json — switched to System.Text.Json -->
+    <PackageReference Include="Npgsql" Version="8.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PLCDataCollector.Core\PLCDataCollector.Core.csproj" />
+  </ItemGroup>
+</Project>

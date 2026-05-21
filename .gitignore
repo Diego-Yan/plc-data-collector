@@ -1,0 +1,23 @@
+# TAG: one-click-deploy — 2026-05-20
+
+# Build output
+publish/
+src/**/bin/
+src/**/obj/
+
+# PostgreSQL portable cache (~100MB, downloaded by scripts/setup-pgsql.bat)
+pgsql-portable/
+
+# Runtime data (created by install.bat on target machine)
+data/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+.DS_Store
