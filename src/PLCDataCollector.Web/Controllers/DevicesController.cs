@@ -1,7 +1,6 @@
 // ============================================================================
-// TAG: fixed — 2026-05-20
-// Fixed SetStatus: wrapped bool in request object instead of bare [FromBody] bool
-//   which is unreliable with System.Text.Json in ASP.NET Core.
+// TAG: review-fix — 2026-06-22 — existence check on update, input validation,
+//      UpdateAsync returns bool for 404.
 // ============================================================================
 
 using Microsoft.AspNetCore.Mvc;
@@ -40,17 +39,24 @@ public class DevicesController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] Device device)
     {
-        var id = await _deviceManager.CreateAsync(device);
-        device.Id = id;
-        return CreatedAtAction(nameof(Get), new { id }, device);
+        try
+        {
+            var id = await _deviceManager.CreateAsync(device);
+            device.Id = id;
+            return CreatedAtAction(nameof(Get), new { id }, device);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(int id, [FromBody] Device device)
     {
         device.Id = id;
-        await _deviceManager.UpdateAsync(device);
-        return NoContent();
+        var ok = await _deviceManager.UpdateAsync(device);
+        return ok ? NoContent() : NotFound();
     }
 
     [HttpDelete("{id}")]
@@ -67,7 +73,6 @@ public class DevicesController : ControllerBase
         return Ok(new { message = "重连已触发" });
     }
 
-    // TAG: fixed — wrapped in object instead of bare bool
     [HttpPut("{id}/status")]
     public async Task<IActionResult> SetStatus(int id, [FromBody] SetStatusRequest request)
     {
@@ -76,7 +81,6 @@ public class DevicesController : ControllerBase
     }
 }
 
-// TAG: added — request wrapper for reliable JSON bool binding
 public class SetStatusRequest
 {
     public bool Enabled { get; set; }

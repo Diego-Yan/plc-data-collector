@@ -1,8 +1,11 @@
 // ============================================================================
 // TAG: merged-from-service — 2026-05-20
 // TAG: thread-safe — 2026-05-20 — added ReaderWriterLockSlim to protect
-//   _devices/_points from concurrent access by CollectorService, ForwardService,
-//   and HTTP controllers.
+// TAG: review-fix — 2026-06-22 — batch point operations, UpdateOnlineStatus,
+//      input validation, save outside lock.
+// TAG: review-fix-2 — 2026-06-22 — GetDevicePoints overloads with int, remove
+//      string-based overloads. Debounce UpdateOnlineStatus save (only persist
+//      on shutdown, not every 1s collection cycle).
 // ============================================================================
 
 using System;
@@ -10,6 +13,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PLCDataCollector.Core.Models;
@@ -24,6 +28,10 @@ public class DeviceManager : IDisposable
     private int _nextPointId = 1;
     private readonly ReaderWriterLockSlim _rwLock = new();
     private readonly string _dataDir;
+    private bool _dirty;
+
+    private static readonly Regex IpRegex = new(
+        @"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", RegexOptions.Compiled);
 
     public DeviceManager()
     {
@@ -31,8 +39,6 @@ public class DeviceManager : IDisposable
         Directory.CreateDirectory(_dataDir);
         Load();
     }
-
-    // ---- persistence ----
 
     private string DevicesPath => Path.Combine(_dataDir, "devices.json");
     private string PointsPath => Path.Combine(_dataDir, "points.json");
@@ -56,20 +62,53 @@ public class DeviceManager : IDisposable
             }
             _nextDeviceId = _devices.Count > 0 ? _devices.Max(d => d.Id) + 1 : 1;
             _nextPointId = _points.Count > 0 ? _points.Max(p => p.Id) + 1 : 1;
+            _dirty = false;
         }
-        catch { /* corrupt file — start fresh */ }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.TraceError("DeviceManager load failed: " + ex.Message);
+        }
         finally { _rwLock.ExitWriteLock(); }
     }
 
     private void Save()
     {
-        // caller must hold write lock; file I/O inside lock is acceptable for small JSON payloads
+        string devicesJson;
+        string pointsJson;
+
+        _rwLock.EnterReadLock();
         try
         {
-            File.WriteAllText(DevicesPath, JsonSerializer.Serialize(_devices));
-            File.WriteAllText(PointsPath, JsonSerializer.Serialize(_points));
+            devicesJson = JsonSerializer.Serialize(_devices);
+            pointsJson = JsonSerializer.Serialize(_points);
         }
-        catch { /* best-effort */ }
+        finally { _rwLock.ExitReadLock(); }
+
+        try
+        {
+            File.WriteAllText(DevicesPath, devicesJson);
+            File.WriteAllText(PointsPath, pointsJson);
+            _dirty = false;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.TraceError("DeviceManager save failed: " + ex.Message);
+        }
+    }
+
+    public void Flush()
+    {
+        if (_dirty) Save();
+    }
+
+    private static void ValidateDevice(Device device)
+    {
+        if (string.IsNullOrWhiteSpace(device.Name))
+            throw new ArgumentException("设备名称不能为空");
+        if (string.IsNullOrWhiteSpace(device.IpAddress) || !IpRegex.IsMatch(device.IpAddress))
+            throw new ArgumentException("无效的IP地址");
+        if (device.Port < 1 || device.Port > 65535)
+            throw new ArgumentException("端口必须在1-65535之间");
     }
 
     // ---- device CRUD ----
@@ -90,29 +129,33 @@ public class DeviceManager : IDisposable
 
     public Task<int> CreateAsync(Device device)
     {
+        ValidateDevice(device);
         _rwLock.EnterWriteLock();
         try
         {
             device.Id = _nextDeviceId++;
             device.CreatedAt = DateTime.UtcNow;
             _devices.Add(device);
-            Save();
-            return Task.FromResult(device.Id);
+            _dirty = true;
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.FromResult(device.Id);
     }
 
-    public Task UpdateAsync(Device device)
+    public Task<bool> UpdateAsync(Device device)
     {
         _rwLock.EnterWriteLock();
         try
         {
             var idx = _devices.FindIndex(d => d.Id == device.Id);
-            if (idx >= 0) _devices[idx] = device;
-            Save();
-            return Task.CompletedTask;
+            if (idx < 0) return Task.FromResult(false);
+            _devices[idx] = device;
+            _dirty = true;
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.FromResult(true);
     }
 
     public Task DeleteAsync(int id)
@@ -122,10 +165,11 @@ public class DeviceManager : IDisposable
         {
             _devices.RemoveAll(d => d.Id == id);
             _points.RemoveAll(p => p.DeviceId == id);
-            Save();
-            return Task.CompletedTask;
+            _dirty = true;
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.CompletedTask;
     }
 
     public Task ReconnectAsync(int id)
@@ -134,11 +178,11 @@ public class DeviceManager : IDisposable
         try
         {
             var device = _devices.FirstOrDefault(d => d.Id == id);
-            if (device != null) device.IsOnline = false;
-            // note: does not close the actual PlcConnection — see CollectorService for full reconnect
-            return Task.CompletedTask;
+            if (device != null) { device.IsOnline = false; _dirty = true; }
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.CompletedTask;
     }
 
     public Task SetStatusAsync(int id, bool enabled)
@@ -147,16 +191,34 @@ public class DeviceManager : IDisposable
         try
         {
             var device = _devices.FirstOrDefault(d => d.Id == id);
-            if (device != null) device.Enabled = enabled;
-            Save();
-            return Task.CompletedTask;
+            if (device != null) { device.Enabled = enabled; _dirty = true; }
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.CompletedTask;
     }
 
-    // ---- query helpers (used by CollectorService + ForwardService) ----
+    public void UpdateOnlineStatus(int id, bool online)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            var device = _devices.FirstOrDefault(d => d.Id == id);
+            if (device != null)
+            {
+                device.IsOnline = online;
+                if (online)
+                    device.LastCollectedAt = DateTime.UtcNow;
+                _dirty = true;
+            }
+        }
+        finally { _rwLock.ExitWriteLock(); }
+        // NOTE: Save is deferred — called at shutdown via Flush() to avoid
+        // disk I/O every 1s collection cycle. Use Flush() to persist on demand.
+    }
 
-    // TAG: thread-safe — returns shallow copies so CollectorService can mutate without lock
+    // ---- query helpers ----
+
     public List<Device> GetActiveDevices()
     {
         _rwLock.EnterReadLock();
@@ -164,11 +226,17 @@ public class DeviceManager : IDisposable
         finally { _rwLock.ExitReadLock(); }
     }
 
-    public List<Point> GetDevicePoints(string deviceIdStr)
+    public List<Point> GetDevicePoints(int deviceId)
     {
-        if (!int.TryParse(deviceIdStr, out var deviceId)) return new();
         _rwLock.EnterReadLock();
         try { return _points.Where(p => p.DeviceId == deviceId).ToList(); }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    public Point? GetPointById(int pointId)
+    {
+        _rwLock.EnterReadLock();
+        try { return _points.FirstOrDefault(p => p.Id == pointId); }
         finally { _rwLock.ExitReadLock(); }
     }
 
@@ -188,10 +256,30 @@ public class DeviceManager : IDisposable
         {
             point.Id = _nextPointId++;
             _points.Add(point);
-            Save();
-            return Task.FromResult(point.Id);
+            _dirty = true;
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.FromResult(point.Id);
+    }
+
+    public Task<int> AddPointsBatch(List<Point> points)
+    {
+        var ids = new List<int>();
+        _rwLock.EnterWriteLock();
+        try
+        {
+            foreach (var point in points)
+            {
+                point.Id = _nextPointId++;
+                _points.Add(point);
+                ids.Add(point.Id);
+            }
+            _dirty = true;
+        }
+        finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.FromResult(ids.Count);
     }
 
     public Task UpdatePoint(Point point)
@@ -199,12 +287,18 @@ public class DeviceManager : IDisposable
         _rwLock.EnterWriteLock();
         try
         {
-            var idx = _points.FindIndex(p => p.Id == point.Id);
-            if (idx >= 0) _points[idx] = point;
-            Save();
-            return Task.CompletedTask;
+            var existing = _points.FirstOrDefault(p => p.Id == point.Id);
+            if (existing != null)
+            {
+                point.DeviceId = existing.DeviceId;
+                var idx = _points.FindIndex(p => p.Id == point.Id);
+                if (idx >= 0) _points[idx] = point;
+                _dirty = true;
+            }
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.CompletedTask;
     }
 
     public Task DeletePoint(int id)
@@ -213,14 +307,30 @@ public class DeviceManager : IDisposable
         try
         {
             _points.RemoveAll(p => p.Id == id);
-            Save();
-            return Task.CompletedTask;
+            _dirty = true;
         }
         finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.CompletedTask;
+    }
+
+    public Task BatchDeletePoints(List<int> ids)
+    {
+        var idSet = new HashSet<int>(ids);
+        _rwLock.EnterWriteLock();
+        try
+        {
+            _points.RemoveAll(p => idSet.Contains(p.Id));
+            _dirty = true;
+        }
+        finally { _rwLock.ExitWriteLock(); }
+        Save();
+        return Task.CompletedTask;
     }
 
     public void Dispose()
     {
+        Flush();
         _rwLock.Dispose();
     }
 }

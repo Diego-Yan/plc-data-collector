@@ -1,10 +1,9 @@
 // ============================================================================
 // TAG: rewritten — 2026-05-20 — JSON file persistence, thread-safe, typed system config
-// TAG: thread-safe — added lock around file Load/Save
-// TAG: type-fix — system config GET now returns ints (not strings) for numeric fields
+// TAG: review-fix-3 — 2026-06-22 — SetSystem accepts camelCase keys from frontend,
+//      maps them to snake_case config keys internally.
 // ============================================================================
 
-using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 
 namespace PLCDataCollector.Web.Controllers;
@@ -17,8 +16,6 @@ public class ConfigController : ControllerBase
     private static readonly string ConfigPath = Path.Combine(ConfigDir, "system_config.json");
     private static readonly object _fileLock = new();
 
-    // ---- internal storage ----
-
     private static Dictionary<string, string> Load()
     {
         lock (_fileLock)
@@ -29,10 +26,20 @@ public class ConfigController : ControllerBase
                 if (System.IO.File.Exists(ConfigPath))
                 {
                     var json = System.IO.File.ReadAllText(ConfigPath);
-                    return JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? Defaults();
+                    var loaded = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+                    if (loaded != null)
+                    {
+                        var merged = Defaults();
+                        foreach (var (k, v) in loaded)
+                            merged[k] = v;
+                        return merged;
+                    }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceError("Config load failed: " + ex.Message);
+            }
             return Defaults();
         }
     }
@@ -44,9 +51,13 @@ public class ConfigController : ControllerBase
             try
             {
                 Directory.CreateDirectory(ConfigDir);
-                System.IO.File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg));
+                System.IO.File.WriteAllText(ConfigPath,
+                    System.Text.Json.JsonSerializer.Serialize(cfg));
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceError("Config save failed: " + ex.Message);
+            }
         }
     }
 
@@ -74,10 +85,10 @@ public class ConfigController : ControllerBase
         var cfg = Load();
         return Ok(new
         {
-            host = cfg["timescaledb_host"],
-            port = cfg["timescaledb_port"],
-            database = cfg["timescaledb_database"],
-            username = cfg["timescaledb_username"]
+            host = cfg.GetValueOrDefault("timescaledb_host", "127.0.0.1"),
+            port = cfg.GetValueOrDefault("timescaledb_port", "5432"),
+            database = cfg.GetValueOrDefault("timescaledb_database", "plc_data"),
+            username = cfg.GetValueOrDefault("timescaledb_username", "postgres")
         });
     }
 
@@ -98,10 +109,10 @@ public class ConfigController : ControllerBase
         var cfg = Load();
         return Ok(new
         {
-            host = cfg["relational_host"],
-            port = cfg["relational_port"],
-            database = cfg["relational_database"],
-            username = cfg["relational_username"]
+            host = cfg.GetValueOrDefault("relational_host", "127.0.0.1"),
+            port = cfg.GetValueOrDefault("relational_port", "5432"),
+            database = cfg.GetValueOrDefault("relational_database", "plc_data_forward"),
+            username = cfg.GetValueOrDefault("relational_username", "postgres")
         });
     }
 
@@ -114,7 +125,15 @@ public class ConfigController : ControllerBase
         return Ok(new { message = "关系库配置已保存" });
     }
 
-    // ---- System (returns ints for numeric fields — TAG: type-fix) ----
+    // ---- System ----
+
+    private static readonly Dictionary<string, string> SystemKeyMap = new()
+    {
+        ["collectInterval"] = "collect_interval",
+        ["timeout"] = "timeout",
+        ["reconnectInterval"] = "reconnect_interval",
+        ["logRetentionDays"] = "log_retention_days"
+    };
 
     [HttpGet("system")]
     public IActionResult GetSystem()
@@ -133,7 +152,12 @@ public class ConfigController : ControllerBase
     public IActionResult SetSystem([FromBody] Dictionary<string, string> body)
     {
         var cfg = Load();
-        foreach (var (k, v) in body) cfg[k] = v;
+        foreach (var (k, v) in body)
+        {
+            if (!SystemKeyMap.TryGetValue(k, out var configKey))
+                return BadRequest(new { error = $"Unknown system key: {k}" });
+            cfg[configKey] = v;
+        }
         Save(cfg);
         return Ok(new { message = "系统设置已保存" });
     }

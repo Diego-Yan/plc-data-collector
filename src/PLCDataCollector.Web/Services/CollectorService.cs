@@ -1,13 +1,13 @@
 // ============================================================================
 // TAG: merged-from-service — 2026-05-20
-// Moved from PLCDataCollector.Service to PLCDataCollector.Web (single-process merge).
-// Changed: injects WebSocketHandler directly (no more stub WebSocketBroadcaster).
-// Changed: "Redis连接失败" log → "缓存服务初始化".
+// TAG: review-fix — 2026-06-22 — thread-safe ConcurrentDictionary, concurrent device
+//      collection, per-point exception isolation, online status write-back.
+// TAG: review-fix-2 — 2026-06-22 — GetOrCreateConnection TryAdd to prevent leak.
+//      PointValue.DeviceId/PointId now int. Removed .ToString() conversions.
 // ============================================================================
 
-// TAG: merged-from-service — 2026-05-20
-// TAG: config-wired — reads CollectIntervalMs from IConfiguration instead of hardcoded 1000ms
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -31,7 +31,7 @@ public class CollectorService : BackgroundService
     private readonly TimeSeriesService _tsService;
     private readonly WebSocketHandler _wsHandler;
     private readonly int _collectIntervalMs;
-    private readonly Dictionary<string, PlcConnection> _connections = new();
+    private readonly ConcurrentDictionary<string, PlcConnection> _connections = new();
 
     public CollectorService(
         ILogger<CollectorService> logger,
@@ -52,10 +52,6 @@ public class CollectorService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("PLC采集服务启动，延迟5秒后开始采集");
-
-        try { await _cacheService.ConnectAsync(); }
-        catch (Exception ex) { _logger.LogWarning(ex, "缓存服务初始化异常"); }
-
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -79,30 +75,39 @@ public class CollectorService : BackgroundService
         var devices = _deviceManager.GetActiveDevices();
         _logger.LogDebug("采集周期开始，共 {Count} 个活跃设备", devices.Count);
 
-        foreach (var device in devices)
+        var tasks = devices.Select(device => CollectDeviceAsync(device, ct));
+        await Task.WhenAll(tasks);
+
+        PruneConnections(devices);
+    }
+
+    private async Task CollectDeviceAsync(Device device, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested) return;
+
+        try
         {
-            if (ct.IsCancellationRequested) break;
+            var conn = GetOrCreateConnection(device);
+            if (conn == null) return;
 
-            try
+            if (!conn.IsConnected)
             {
-                var conn = GetOrCreateConnection(device);
-                if (conn == null) continue;
-
-                if (!conn.IsConnected)
+                var ok = await conn.ConnectAsync();
+                if (!ok)
                 {
-                    var ok = await conn.ConnectAsync();
-                    if (!ok)
-                    {
-                        device.IsOnline = false;
-                        await _cacheService.SetDeviceStatus(device.Id.ToString(), false);
-                        await _wsHandler.BroadcastStatus(device.Id.ToString(), false);
-                        continue;
-                    }
-                    device.IsOnline = true;
+                    _deviceManager.UpdateOnlineStatus(device.Id, false);
+                    await _cacheService.SetDeviceStatus(device.Id, false);
+                    await _wsHandler.BroadcastStatus(device.Id, false);
+                    return;
                 }
+            }
 
-                var points = _deviceManager.GetDevicePoints(device.Id.ToString());
-                foreach (var point in points)
+            var points = _deviceManager.GetDevicePoints(device.Id);
+            foreach (var point in points)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                try
                 {
                     var rawValue = await conn.ReadAsync(point.Address);
                     double? value = null;
@@ -115,42 +120,48 @@ public class CollectorService : BackgroundService
 
                     var pv = new PointValue
                     {
-                        DeviceId = device.Id.ToString(),
-                        PointId = point.Id.ToString(),
+                        DeviceId = device.Id,
+                        PointId = point.Id,
                         Value = value,
                         Timestamp = DateTime.UtcNow,
                         Quality = value.HasValue ? QualityStatus.Good : QualityStatus.BadValue
                     };
 
-                    await _cacheService.SetPointValue(pv);
-                    await _tsService.WritePoint(pv);
-                    await _wsHandler.BroadcastPoint(pv);
+                    try { await _cacheService.SetPointValue(pv); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "缓存写入失败 {Device}/{Point}", device.Id, point.Id); }
+
+                    try { await _tsService.WritePoint(pv); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "时序写入失败 {Device}/{Point}", device.Id, point.Id); }
+
+                    try { await _wsHandler.BroadcastPoint(pv); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "广播失败 {Device}/{Point}", device.Id, point.Id); }
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "采集点位 {Address} 失败", point.Address);
+                }
+            }
 
-                device.LastCollectedAt = DateTime.UtcNow;
-                device.IsOnline = true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "采集设备 {Name}({Ip}) 异常", device.Name, device.IpAddress);
-                device.IsOnline = false;
-            }
+            _deviceManager.UpdateOnlineStatus(device.Id, true);
+            await _cacheService.SetDeviceStatus(device.Id, true);
+            await _wsHandler.BroadcastStatus(device.Id, true);
         }
-
-        // TAG: fixed — purge connections for deleted devices
-        PruneConnections(devices);
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "采集设备 {Name}({Ip}) 异常", device.Name, device.IpAddress);
+            _deviceManager.UpdateOnlineStatus(device.Id, false);
+            await _cacheService.SetDeviceStatus(device.Id, false);
+            await _wsHandler.BroadcastStatus(device.Id, false);
+        }
     }
 
-    /// <summary>
-    /// Remove connections for devices that no longer exist (deleted via API).
-    /// </summary>
     private void PruneConnections(List<Device> activeDevices)
     {
         var activeIds = new HashSet<string>(activeDevices.Select(d => d.Id.ToString()));
         var staleIds = _connections.Keys.Where(k => !activeIds.Contains(k)).ToList();
         foreach (var id in staleIds)
         {
-            if (_connections.Remove(id, out var conn))
+            if (_connections.TryRemove(id, out var conn))
             {
                 try { conn.Dispose(); } catch { }
             }
@@ -162,7 +173,14 @@ public class CollectorService : BackgroundService
         _logger.LogInformation("PLC采集服务停止，清理 {Count} 个连接", _connections.Count);
         foreach (var conn in _connections.Values)
         {
-            try { conn.Dispose(); } catch { }
+            try
+            {
+                if (conn is IAsyncDisposable ad)
+                    await ad.DisposeAsync();
+                else
+                    conn.Dispose();
+            }
+            catch { }
         }
         _connections.Clear();
         await base.StopAsync(cancellationToken);
@@ -171,22 +189,19 @@ public class CollectorService : BackgroundService
     private PlcConnection? GetOrCreateConnection(Device device)
     {
         var id = device.Id.ToString();
-        if (_connections.TryGetValue(id, out var conn))
+
+        if (_connections.TryGetValue(id, out var existing))
         {
-            // TAG: fixed — if device IP/port changed, replace stale connection
-            if (conn.Ip != device.IpAddress || conn.Port != device.Port)
+            if (existing.Ip == device.IpAddress && existing.Port == device.Port)
+                return existing;
+
+            if (_connections.TryRemove(id, out var old))
             {
-                try { conn.Dispose(); } catch { }
-                _connections.Remove(id);
-            }
-            else
-            {
-                return conn;
+                try { old.Dispose(); } catch { }
             }
         }
 
-        conn = new PlcConnection(id, device.IpAddress, device.Port, device.Rack, device.Slot);
-        _connections[id] = conn;
-        return conn;
+        var newConn = new PlcConnection(id, device.IpAddress, device.Port, device.Rack, device.Slot);
+        return _connections.TryAdd(id, newConn) ? newConn : _connections.GetValueOrDefault(id);
     }
 }

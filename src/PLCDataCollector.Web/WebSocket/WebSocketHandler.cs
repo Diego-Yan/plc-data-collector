@@ -1,10 +1,3 @@
-// ============================================================================
-// TAG: thread-safe — 2026-05-20 — replaced HashSet<WebSocket> with
-//   ConcurrentDictionary<WebSocket, byte> to prevent corruption under
-//   concurrent subscribe/unsubscribe/broadcast.
-// TAG: json-switch — replaced Newtonsoft.Json with System.Text.Json
-// ============================================================================
-
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -15,7 +8,6 @@ namespace PLCDataCollector.Web.WebSocket;
 
 public class WebSocketHandler
 {
-    // deviceId → set of subscribed sockets (ConcurrentDictionary as thread-safe set)
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<System.Net.WebSockets.WebSocket, byte>> _subscriptions = new();
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -68,14 +60,9 @@ public class WebSocketHandler
             }
         }
 
-        // cleanup: remove closed sockets from all subscriptions
         foreach (var (key, sockets) in _subscriptions)
         {
-            foreach (var s in sockets.Keys)
-            {
-                if (s.State != WebSocketState.Open)
-                    sockets.TryRemove(s, out _);
-            }
+            sockets.TryRemove(ws, out _);
             if (sockets.IsEmpty)
                 _subscriptions.TryRemove(key, out _);
         }
@@ -86,30 +73,30 @@ public class WebSocketHandler
         var payload = new
         {
             type = "data",
-            deviceId = pv.DeviceId,
-            pointId = pv.PointId,
+            deviceId = pv.DeviceId.ToString(),
+            pointId = pv.PointId.ToString(),
             value = pv.Value,
-            ts = pv.Timestamp,
+            ts = pv.Timestamp.ToString("O"),
             quality = (int)pv.Quality
         };
         var json = JsonSerializer.Serialize(payload, JsonOpts);
         var bytes = Encoding.UTF8.GetBytes(json);
 
-        await BroadcastToDevice(pv.DeviceId, bytes);
+        await BroadcastToDevice(pv.DeviceId.ToString(), bytes);
     }
 
-    public async Task BroadcastStatus(string deviceId, bool online)
+    public async Task BroadcastStatus(int deviceId, bool online)
     {
         var payload = new
         {
             type = "status",
-            deviceId,
+            deviceId = deviceId.ToString(),
             online
         };
         var json = JsonSerializer.Serialize(payload, JsonOpts);
         var bytes = Encoding.UTF8.GetBytes(json);
 
-        await BroadcastToDevice(deviceId, bytes);
+        await BroadcastToDevice(deviceId.ToString(), bytes);
     }
 
     private async Task BroadcastToDevice(string deviceId, byte[] data)
@@ -117,7 +104,6 @@ public class WebSocketHandler
         if (!_subscriptions.TryGetValue(deviceId, out var sockets)) return;
 
         var segment = new ArraySegment<byte>(data);
-        // snapshot keys to avoid mutation during iteration
         foreach (var ws in sockets.Keys.ToArray())
         {
             if (ws.State == WebSocketState.Open)

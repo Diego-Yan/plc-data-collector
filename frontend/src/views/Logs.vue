@@ -1,41 +1,26 @@
 <template>
-  <el-card>
-    <template #header>日志中心</template>
-    <el-form inline>
-      <el-form-item label="等级">
-        <el-select v-model="level" style="width:120px">
-          <el-option label="全部" value="" />
-          <el-option label="Info" value="Info" />
-          <el-option label="Warn" value="Warn" />
-          <el-option label="Error" value="Error" />
-        </el-select>
-      </el-form-item>
-      <el-form-item>
-        <el-button type="primary" @click="search">查询</el-button>
-      </el-form-item>
-    </el-form>
-    <el-table :data="logs" stripe>
-      <el-table-column prop="time" label="时间" width="180" />
-      <el-table-column prop="level" label="等级" width="80">
-        <template #default="{ row }">
-          <el-tag :type="row.level === 'Error' ? 'danger' : row.level === 'Warn' ? 'warning' : 'info'" size="small">
-            {{ row.level }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="message" label="消息" />
-    </el-table>
-  </el-card>
+  <div>
+    <el-card>
+      <template #header>
+        <span>日志中心</span>
+        <span style="float:right;color:#909399;font-size:13px">
+          日志文件位置: logs\ 目录
+        </span>
+      </template>
+      <p style="color:#909399;text-align:center;padding:40px 0">
+        日志功能已启用，所有采集、转发和错误日志将写入 logs\ 目录下的日志文件。
+        <br />
+        请通过文件管理器或文本编辑器在服务器上查看日志文件。
+      </p>
+    </el-card>
+    <el-card style="margin-top:15px">
+      <template #header>故障排查提示</template>
+      <ul style="line-height:2">
+        <li><strong>服务无法启动：</strong>检查 Windows 事件查看器 → 应用程序</li>
+        <li><strong>设备离线：</strong>检查 PLC 网络连通性、端口 102 是否开放</li>
+        <li><strong>采集无数据：</strong>确认设备点位地址正确、数据类型匹配</li>
+        <li><strong>数据库错误：</strong>确认 PostgreSQL 服务正在运行、连接串密码正确</li>
+      </ul>
+    </el-card>
+  </div>
 </template>
-
-<script setup lang="ts">
-// TAG: fixed — added ElMessage import
-import { ref } from 'vue'
-import { ElMessage } from 'element-plus'
-const level = ref('')
-const logs = ref<any[]>([
-  { time: new Date().toISOString(), level: 'Info', message: '系统已启动' },
-  { time: new Date().toISOString(), level: 'Info', message: 'PLC采集服务已启动' },
-])
-function search() { ElMessage.info('日志查询功能需要后端实现') }
-</script>
