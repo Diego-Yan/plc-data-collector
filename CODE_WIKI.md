@@ -1,6 +1,6 @@
 # PLC 数据采集系统 — Code Wiki
 
-> 版本：v1.3.1 | 日期：2026-06-22
+> 版本：v1.4.0 | 日期：2026-06-22
 > 本文档为代码级技术参考，覆盖项目整体架构、模块职责、关键类与函数、依赖关系及运行方式。
 
 ---
@@ -860,15 +860,19 @@ uninstall.bat                   # 卸载全部（保留数据目录）
 | 1.1.0 | 2026-05-20 | **单进程合并**：Web + Service 合并消除内存隔离；移除 Redis 残留；DeviceManager JSON 持久化；修复 API 路由、ElMessage 导入、ForwardService 骨架 |
 | 1.2.0 | 2026-05-20 | **Code Review 修复**：PlcConnection 改异步 API；DeviceManager 加 `ReaderWriterLockSlim`；WebSocketHandler 改 `ConcurrentDictionary`；ConfigController 加文件锁 + 系统配置返回 int；CollectorService 从配置读采集间隔；Core 移除 NLog；Web 移除 Newtonsoft → System.Text.Json；前端 vue-tsc 1.8→2.0，移除未用 echarts |
 | 1.3.0 | 2026-05-20 | **真正一键部署**：部署包自带 PostgreSQL 16 + TimescaleDB 便携版；install.bat 全自动 initdb→建库→建表→注册服务→启动→开浏览器；目标机零依赖 |
-| 1.3.1 | 2026-05-20 | **审计修复**：CollectorService StopAsync 清理连接泄漏；设备变更检测重连；删设备自动清理连接；Device.Copy() 浅拷贝消除跨线程竞争；前端 TS 错误修复；SystemConfig 数字→字符串转换；PlcConnection 暴露 Ip/Port |
+| 1.3.1 | 2026-06-22 | **第 1+2 轮深度审计**：SQL 注入防护 (`QuoteIdentifier` + `^\d+$`)；设备在线状态回写 `UpdateOnlineStatus`；PlcConnection `IAsyncDisposable` + `WaitAsync` 超时；`ConcurrentDictionary` 采集中替换 `Dictionary`；`PointValue.DeviceId/PointId` int 统一；`NpgsqlDataSource` 连接池替换裸连接；`EnsureWideTable` 缓存；`UpdateOnlineStatus` 去抖保存；`GetOrCreateConnection TryAdd` 防泄漏 |
+| 1.3.2 | 2026-06-22 | **第 3 轮审计**：`ConfigController` 新增 `SystemKeyMap` 前端 camelCase↔后端 snake_case 映射；`install.bat` 创建 `plc_data_forward` 独立关系库 + 双连接串；`build.bat` 错误处理语法重写 + 自动下载 PostgreSQL；`ForwardConfig`/`Logs`/`Points` 前端组件真实实现 |
+| 1.4.0 | 2026-06-22 | **第 4+5 轮审计**：WebSocket disconnect 清理 `reconnectTimer`；Router 导航守卫 `beforeEach`；`SystemConfig`/`StorageConfig` save 错误处理；`AppConfig` 移除死 `DatabaseConfig` 类；`DEVELOPMENT.md`/`README.md` 全面更新；新增 `CODE_WIKI.md` 代码级架构文档。累 计 52 项修复，7 严重 / 12 高危 / 14 中等 / 4 低。 |
 
 ### 关键架构决策回顾
 
-1. **双进程 → 单进程**：解决 Web API 修改对采集进程不可见的问题，所有服务注册为单例共享内存。
-2. **Redis → MemoryCache**：简化部署，消除外部依赖，进程内缓存满足实时性需求。
-3. **JSON 文件 → (计划) PostgreSQL**：当前 DeviceManager 使用 JSON 持久化，待办事项中计划迁移至数据库。
-4. **Newtonsoft.Json → System.Text.Json**：统一序列化栈，减少依赖。
-5. **同步 → 异步**：PlcConnection 全面异步化，避免 sync-over-async 线程池问题。
+1. **双进程 → 单进程 (v1.1.0)**：解决 Web API 修改对采集进程不可见的问题，所有服务注册为单例共享内存。
+2. **Redis → MemoryCache (v1.1.0)**：简化部署，消除外部依赖，进程内缓存满足实时性需求，v1.4.0 增加 50000 条容量上限。
+3. **SQL 注入防护 (v1.3.1)**：动态表名使用 `NpgsqlCommandBuilder.QuoteIdentifier()` 保护，deviceId 用正则 `^\d+$` 校验。
+4. **Type 统一 (v1.3.1)**：`DeviceId` / `PointId` 全栈从 `string` 改为 `int`，消除所有 `.ToString()` / `int.TryParse` 转换。
+5. **NpgsqlDataSource 连接池 (v1.3.1)**：`TimeSeriesService` 从每次 `new NpgsqlConnection` 改为 `NpgsqlDataSource` 连接池，实现 `IDisposable`。
+6. **API 契约映射 (v1.3.2)**：`ConfigController` 通过 `SystemKeyMap` 字典实现前端 camelCase 键到后端 snake_case 键的安全映射。
+7. **同步 → 异步 (v1.2.0)**：PlcConnection 全面异步化，避免 sync-over-async 线程池问题。
 
 ---
 
