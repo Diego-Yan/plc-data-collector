@@ -1,36 +1,61 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
+const RECONNECT_DELAY_MS = 3000
+
 export const useWebSocketStore = defineStore('websocket', () => {
   const ws = ref<WebSocket | null>(null)
   const connected = ref(false)
-  let handlers: Map<string, (data: any) => void> = new Map()
+  let handlers = new Map<string, (data: any) => void>()
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let currentUrl: string = ''
+
+  function clearTimer() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
 
   function connect(url: string) {
-    if (ws.value?.readyState === WebSocket.OPEN) return
+    clearTimer()
+    currentUrl = url
+
+    if (ws.value?.readyState === WebSocket.OPEN || ws.value?.readyState === WebSocket.CONNECTING)
+      return
+
+    if (ws.value) {
+      try { ws.value.close() } catch {}
+    }
+
     ws.value = new WebSocket(url)
 
     ws.value.onopen = () => {
       connected.value = true
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+      clearTimer()
     }
 
     ws.value.onclose = () => {
       connected.value = false
-      reconnectTimer = setTimeout(() => connect(url), 3000)
+      if (currentUrl) {
+        reconnectTimer = setTimeout(() => connect(currentUrl), RECONNECT_DELAY_MS)
+      }
     }
+
+    ws.value.onerror = () => {}
 
     ws.value.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
         handlers.forEach((handler) => handler(data))
-      } catch { }
+      } catch {}
     }
   }
 
   function disconnect() {
-    ws.value?.close()
+    clearTimer()
+    currentUrl = ''
+    try { ws.value?.close() } catch {}
     ws.value = null
     connected.value = false
   }
@@ -52,7 +77,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
   }
 
   function onMessage(handler: (data: any) => void) {
-    const key = `handler_${Date.now()}`
+    const key = `handler_${Date.now()}_${Math.random().toString(36).slice(2)}`
     handlers.set(key, handler)
     return () => handlers.delete(key)
   }

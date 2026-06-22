@@ -6,7 +6,8 @@ echo   PLC 数据采集系统 — 一键安装
 echo ============================================
 echo.
 :: TAG: one-click-deploy — 2026-05-20
-:: Fully automated: embedded PostgreSQL + TimescaleDB + Windows Service + Web
+:: TAG: review-fix-3 — 2026-06-22 — create plc_data_forward database,
+::      use separate connection strings for TimeSeriesDb/RelationalDb.
 
 set "SERVICE_NAME=PLCDataCollector"
 set "PG_SERVICE_NAME=PLCDataCollectorDB"
@@ -14,6 +15,7 @@ set "PG_PORT=5432"
 set "PG_USER=postgres"
 set "PG_PASSWORD=plcdata2024"
 set "PG_DATABASE=plc_data"
+set "PG_FWD_DATABASE=plc_data_forward"
 set "WEB_PORT=5000"
 set "INSTALL_DIR=%~dp0"
 set "PG_DIR=%INSTALL_DIR%pgsql"
@@ -89,11 +91,8 @@ if not exist "%PG_DATA%" (
 :: 配置 postgresql.conf
 echo   应用配置...
 set "PGCONF=%PG_DATA%\postgresql.conf"
-:: 端口
 powershell -Command "(Get-Content '%PGCONF%') -replace '#?port\s*=\s*\d+', 'port = %PG_PORT%'" | powershell -Command "$input | Set-Content '%PGCONF%'"
-:: 监听地址
 powershell -Command "(Get-Content '%PGCONF%') -replace '#?listen_addresses\s*=\s*''.*''', 'listen_addresses = ''127.0.0.1'''" | powershell -Command "$input | Set-Content '%PGCONF%'"
-:: shared_preload_libraries (TimescaleDB)
 findstr /C:"shared_preload_libraries" "%PGCONF%" >nul 2>&1
 if %errorlevel% neq 0 (
     echo shared_preload_libraries = 'timescaledb' >> "%PGCONF%"
@@ -138,11 +137,15 @@ exit /b 1
 echo [3/6] 初始化数据库...
 set "PSQL=%PG_DIR%\bin\psql.exe -h 127.0.0.1 -p %PG_PORT% -U %PG_USER%"
 
-:: 创建数据库（如果不存在）
-echo   创建数据库...
-echo SELECT 'CREATE DATABASE %PG_DATABASE%' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%PG_DATABASE%')\g | "%PSQL%" -d postgres >nul 2>&1
+:: 创建时序库
+echo   创建时序库...
 %PSQL% -d postgres -c "CREATE DATABASE %PG_DATABASE%;" >nul 2>&1
-echo   [OK] 数据库: %PG_DATABASE%
+echo   [OK] 时序库: %PG_DATABASE%
+
+:: 创建关系库
+echo   创建关系库...
+%PSQL% -d postgres -c "CREATE DATABASE %PG_FWD_DATABASE%;" >nul 2>&1
+echo   [OK] 关系库: %PG_FWD_DATABASE%
 
 :: 设置密码
 %PSQL% -d postgres -c "ALTER USER %PG_USER% PASSWORD '%PG_PASSWORD%';" >nul 2>&1
@@ -163,14 +166,14 @@ if exist "%SQL_DIR%\init.sql" (
 :: 4. 写入连接配置到 appsettings
 :: ====================================================================
 echo [4/6] 写入连接配置...
-set "CONNSTR=Host=127.0.0.1;Port=%PG_PORT%;Database=%PG_DATABASE%;Username=%PG_USER%;Password=%PG_PASSWORD%"
+set "TS_CONNSTR=Host=127.0.0.1;Port=%PG_PORT%;Database=%PG_DATABASE%;Username=%PG_USER%;Password=%PG_PASSWORD%"
+set "REL_CONNSTR=Host=127.0.0.1;Port=%PG_PORT%;Database=%PG_FWD_DATABASE%;Username=%PG_USER%;Password=%PG_PASSWORD%"
 set "APPSETTINGS=%INSTALL_DIR%service\appsettings.json"
 
-:: 用 PowerShell 更新 JSON（比手动字符串替换更可靠）
 powershell -Command ^
   "$json = Get-Content '%APPSETTINGS%' -Raw | ConvertFrom-Json; ^
-   $json.ConnectionStrings.TimeSeriesDb = '%CONNSTR%'; ^
-   $json.ConnectionStrings.RelationalDb = '%CONNSTR%'; ^
+   $json.ConnectionStrings.TimeSeriesDb = '%TS_CONNSTR%'; ^
+   $json.ConnectionStrings.RelationalDb = '%REL_CONNSTR%'; ^
    $json | ConvertTo-Json | Set-Content '%APPSETTINGS%'"
 
 if %errorlevel% neq 0 (
@@ -224,10 +227,10 @@ echo   访问地址: http://localhost:%WEB_PORT%
 echo   默认账号: admin / admin
 echo.
 echo   数据库信息:
-echo     端口: %PG_PORT%
+echo     时序库: localhost:%PG_PORT%/%PG_DATABASE%
+echo     关系库: localhost:%PG_PORT%/%PG_FWD_DATABASE%
 echo     用户: %PG_USER%
 echo     密码: %PG_PASSWORD%
-echo     数据库: %PG_DATABASE%
 echo.
 echo   管理命令:
 echo     net start %SERVICE_NAME%      启动应用

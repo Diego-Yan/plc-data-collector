@@ -12,29 +12,31 @@ public class MemoryCacheService : IDisposable
 
     public MemoryCacheService()
     {
-        _cache = new MemoryCache(new MemoryCacheOptions());
-    }
-
-    public Task ConnectAsync()
-    {
-        return Task.CompletedTask;
+        _cache = new MemoryCache(new MemoryCacheOptions
+        {
+            SizeLimit = 50000
+        });
     }
 
     public Task SetPointValue(PointValue pv)
     {
         var key = $"point:{pv.DeviceId}:{pv.PointId}";
-        _cache.Set(key, pv, DefaultExpiry);
+        _cache.Set(key, pv, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = DefaultExpiry,
+            Size = 1
+        });
         return Task.CompletedTask;
     }
 
-    public Task<PointValue?> GetPointValue(string deviceId, string pointId)
+    public Task<PointValue?> GetPointValue(int deviceId, int pointId)
     {
         var key = $"point:{deviceId}:{pointId}";
         var result = _cache.Get<PointValue?>(key);
         return Task.FromResult(result);
     }
 
-    public Task SetDeviceStatus(string deviceId, bool online)
+    public Task SetDeviceStatus(int deviceId, bool online)
     {
         var key = $"device:{deviceId}:status";
         var status = new DeviceStatus
@@ -42,11 +44,15 @@ public class MemoryCacheService : IDisposable
             Online = online,
             LastSeen = DateTime.UtcNow.ToString("O")
         };
-        _cache.Set(key, status, DefaultExpiry);
+        _cache.Set(key, status, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = DefaultExpiry,
+            Size = 1
+        });
         return Task.CompletedTask;
     }
 
-    public Task<DeviceStatus?> GetDeviceStatus(string deviceId)
+    public Task<DeviceStatus?> GetDeviceStatus(int deviceId)
     {
         var key = $"device:{deviceId}:status";
         var result = _cache.Get<DeviceStatus?>(key);

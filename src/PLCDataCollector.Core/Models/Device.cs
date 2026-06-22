@@ -16,7 +16,6 @@ public class Device
     public DateTime? LastCollectedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-    // TAG: fixed — shallow copy for thread-safe collector iteration
     public Device Copy() => new()
     {
         Id = Id,
@@ -52,8 +51,8 @@ public enum DataType
 
 public class PointValue
 {
-    public string DeviceId { get; set; } = "";
-    public string PointId { get; set; } = "";
+    public int DeviceId { get; set; }
+    public int PointId { get; set; }
     public double? Value { get; set; }
     public DateTime Timestamp { get; set; }
     public QualityStatus Quality { get; set; } = QualityStatus.Good;

@@ -1,11 +1,5 @@
-// ============================================================================
-// TAG: single-process-merge — 2026-05-20
-// Merged Windows Service + ASP.NET Kestrel into one process.
-// Was two separate executables (Service + Web) with no shared memory.
-// Now: single exe that runs Windows Service, hosts Kestrel, WebSocket, and
-// all BackgroundServices (Collector, Forward) in one process.
-// ============================================================================
-
+// TAG: review-fix-2 — 2026-06-22 — NLog configuration, add TimeSeriesService to DI
+//      disposal via IHostApplicationLifetime, DeviceManager.Flush on shutdown.
 using PLCDataCollector.Core.Cache;
 using PLCDataCollector.Core.Storage;
 using PLCDataCollector.Web.Services;
@@ -13,13 +7,10 @@ using PLCDataCollector.Web.WebSocket;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ---- Windows Service ----
 builder.Host.UseWindowsService(options => options.ServiceName = "PLCDataCollector");
 
-// ---- MVC + Controllers ----
 builder.Services.AddControllers();
 
-// ---- Core services (singletons — shared across web requests + background services) ----
 builder.Services.AddSingleton<MemoryCacheService>();
 builder.Services.AddSingleton(sp =>
 {
@@ -31,18 +22,15 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton<DeviceManager>();
 builder.Services.AddSingleton<WebSocketHandler>();
 
-// ---- Background services (IHostedService) ----
 builder.Services.AddHostedService<CollectorService>();
 builder.Services.AddHostedService<ForwardService>();
 
-// ---- Build ----
 var app = builder.Build();
 
 app.UseWebSockets();
 app.UseStaticFiles();
 app.MapControllers();
 
-// ---- WebSocket endpoint ----
 app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
 {
     if (ctx.WebSockets.IsWebSocketRequest)
@@ -57,5 +45,11 @@ app.Map("/ws", async (HttpContext ctx, WebSocketHandler handler) =>
 });
 
 app.MapFallbackToFile("index.html");
+
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() =>
+{
+    app.Services.GetRequiredService<DeviceManager>().Flush();
+});
 
 app.Run();
